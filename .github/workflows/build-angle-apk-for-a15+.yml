@@ -1,0 +1,137 @@
+name: Build ANGLE APK for A15+
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-angle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      DEPOT_TOOLS_PATH: ${{ github.workspace }}/depot_tools
+      ANGLE_ROOT: ${{ github.workspace }}/angle
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          docker image prune -af
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl python3 python3-pip \
+            openjdk-17-jdk-headless \
+            ninja-build
+
+      - name: Set JDK environment
+        run: |
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
+          echo "/usr/lib/jvm/java-17-openjdk-amd64/bin" >> $GITHUB_PATH
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      - name: Cache depot_tools
+        id: cache-depot-tools
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPOT_TOOLS_PATH }}
+          key: depot-tools-${{ runner.os }}-v1
+          restore-keys: |
+            depot-tools-${{ runner.os }}-
+
+      - name: Fetch depot_tools
+        if: steps.cache-depot-tools.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 \
+            https://chromium.googlesource.com/chromium/tools/depot_tools.git \
+            "$DEPOT_TOOLS_PATH"
+
+      - name: Ensure depot_tools in PATH
+        run: echo "$DEPOT_TOOLS_PATH" >> $GITHUB_PATH
+
+      - name: Configure git
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+
+      - name: Fetch ANGLE source
+        run: |
+          mkdir -p "$ANGLE_ROOT"
+          cd "$ANGLE_ROOT"
+
+          cat > .gclient << 'EOF'
+          solutions = [
+            {
+              "name": ".",
+              "url": "https://chromium.googlesource.com/angle/angle.git@refs/heads/main",
+              "deps_file": "DEPS",
+              "managed": False,
+              "custom_deps": {},
+              "custom_vars": {},
+            },
+          ]
+          target_os = ['android']
+          EOF
+
+          gclient sync --no-history
+
+      - name: Generate GN build files
+        run: |
+          cd "$ANGLE_ROOT"
+          gn gen out/Android --args='
+            target_os = "android"
+            target_cpu = "arm64"
+            android32_ndk_api_level = 35
+            android64_ndk_api_level = 35
+            is_component_build = false
+            is_debug = false
+            arm_control_flow_integrity = "none"
+            use_rtti = false
+            use_thin_lto = true
+            thin_lto_enable_optimizations = true
+            use_lld = true
+            angle_enable_vulkan = true
+            angle_enable_gl = false
+            angle_enable_vulkan_validation_layers = false
+            angle_enable_vulkan_api_dump_layer = false
+            angle_assert_always_on = false
+            dcheck_always_on = false
+            angle_enable_trace = false
+            angle_enable_trace_events = false
+            angle_enable_trace_android_logcat = false
+            angle_enable_platform_trace_events = false
+            angle_always_log_info = false
+            angle_enable_annotator_run_time_checks = false
+            angle_build_all = false
+            enable_resource_allowlist_generation = false
+            symbol_level = 0
+            strip_debug_info = true
+            use_goma = false
+            use_remoteexec = false
+          '
+
+      - name: Build ANGLE APK
+        run: |
+          cd "$ANGLE_ROOT"
+          autoninja -C out/Android angle_apks
+
+      - name: Upload ANGLE APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: angle-apk
+          path: ${{ env.ANGLE_ROOT }}/out/Android/apks/AngleLibraries.apk
+          if-no-files-found: error
